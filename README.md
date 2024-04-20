@@ -11,15 +11,10 @@ class EdgeConv(nn.Module):
         super(EdgeConv, self).__init__()
         self.batch_norm = batch_norm
         self._allow_zero_in_degree = allow_zero_in_degree
-
         self.theta = nn.Linear(in_feat, out_feat)
         self.phi = nn.Linear(in_feat, out_feat)
-
         if batch_norm:
             self.bn = nn.BatchNorm1d(out_feat)
-
-    def set_allow_zero_in_degree(self, set_value):
-        self._allow_zero_in_degree = set_value
 
     def forward(self, g, feat):
         with g.local_scope():
