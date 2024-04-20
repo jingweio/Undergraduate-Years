@@ -1,28 +1,53 @@
 # Image-Segmentation
 
 ```python
-import torch
-from torch import Tensor
-from torch.nn import Sequential, Linear, ReLU
-from torch_geometric.nn import MessagePassing
+from torch import nn
+from .... import function as fn
+from ....base import DGLError
+from ....utils import expand_as_pair
 
-class EdgeConv(MessagePassing):
-    def __init__(self, in_channels, out_channels):
-        super().__init__(aggr="max")  # "Max" aggregation.
-        self.mlp = Sequential(
-            Linear(2 * in_channels, out_channels),
-            ReLU(),
-            Linear(out_channels, out_channels),
-        )
+class EdgeConv(nn.Module):
+    def __init__(self, in_feat, out_feat, batch_norm=False, allow_zero_in_degree=False):
+        super(EdgeConv, self).__init__()
+        self.batch_norm = batch_norm
+        self._allow_zero_in_degree = allow_zero_in_degree
 
-    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
-        # x: Node feature matrix of shape [num_nodes, in_channels]
-        # edge_index: Graph connectivity matrix of shape [2, num_edges]
-        return self.propagate(edge_index, x=x)  # shape [num_nodes, out_channels]
+        self.theta = nn.Linear(in_feat, out_feat)
+        self.phi = nn.Linear(in_feat, out_feat)
 
-    def message(self, x_j: Tensor, x_i: Tensor) -> Tensor:
-        # x_j: Source node features of shape [num_edges, in_channels]
-        # x_i: Target node features of shape [num_edges, in_channels]
-        edge_features = torch.cat([x_i, x_j - x_i], dim=-1)
-        return self.mlp(edge_features)  # shape [num_edges, out_channels]
+        if batch_norm:
+            self.bn = nn.BatchNorm1d(out_feat)
+
+    def set_allow_zero_in_degree(self, set_value):
+        self._allow_zero_in_degree = set_value
+
+    def forward(self, g, feat):
+        with g.local_scope():
+            if not self._allow_zero_in_degree:
+                if (g.in_degrees() == 0).any():
+                    raise DGLError(
+                        "There are 0-in-degree nodes in the graph, "
+                        "output for those nodes will be invalid. "
+                        "This is harmful for some applications, "
+                        "causing silent performance regression. "
+                        "Adding self-loop on the input graph by "
+                        "calling `g = dgl.add_self_loop(g)` will resolve "
+                        "the issue. Setting ``allow_zero_in_degree`` "
+                        "to be `True` when constructing this module will "
+                        "suppress the check and let the code run."
+                    )
+
+            h_src, h_dst = expand_as_pair(feat, g)
+            g.srcdata["x"] = h_src
+            g.dstdata["x"] = h_dst
+            g.apply_edges(fn.v_sub_u("x", "x", "theta"))
+            g.edata["theta"] = self.theta(g.edata["theta"])
+            g.dstdata["phi"] = self.phi(g.dstdata["x"])
+            if not self.batch_norm:
+                g.update_all(fn.e_add_v("theta", "phi", "e"), fn.max("e", "x"))
+            else:
+                g.apply_edges(fn.e_add_v("theta", "phi", "e"))
+                g.edata["e"] = self.bn(g.edata["e"])
+                g.update_all(fn.copy_e("e", "e"), fn.max("e", "x"))
+            return g.dstdata["x"]
 ```
